@@ -27,12 +27,26 @@ pub struct WheelBuf<C, I>
     data: C,
 
     /// Insert position
-    pos: usize,
+    head: usize,
 
-    /// Total items written
-    total: usize,
+    /// Position of the first item to be pushed
+    tail: usize,
+
+    /// Number of items in the buffer
+    len: usize,
 
     _pd: PhantomData<I>,
+}
+///
+/// WheelBuf iterator
+#[derive(Debug)]
+pub struct WheelBufDrain<'a, I>
+    where I: 'a,
+{
+    buffer: &'a [I],
+    head: &'a mut usize,
+    tail: &'a mut usize,
+    len: &'a mut usize,
 }
 
 /// WheelBuf iterator
@@ -57,18 +71,11 @@ impl<C, I> WheelBuf<C, I>
     pub fn new(data: C) -> WheelBuf<C, I> {
         WheelBuf {
             data: data,
-            pos: 0,
-            total: 0,
+            head: 0,
+            tail: 0,
+            len: 0,
             _pd: PhantomData,
         }
-    }
-
-    /// Total number of entries seen.
-    ///
-    /// A non-resetting counter of the number of entries added.
-    #[inline]
-    pub fn total(&self) -> usize {
-        self.total
     }
 
     // /// Add item to wheel buffer.
@@ -90,21 +97,35 @@ impl<C, I> WheelBuf<C, I>
     /// Number of items in buffer.
     #[inline]
     pub fn len(&self) -> usize {
-        cmp::min(self.total, self.capacity())
+        self.len
+    }
+
+    pub fn head(&self) -> usize {
+        self.head
+    }
+
+    pub fn tail(&self) -> usize {
+        self.tail
+    }
+
+    /// Drains the buffer.
+    #[inline]
+    pub fn drain<'a>(&'a mut self) -> WheelBufDrain<'a, I> {
+        WheelBufDrain {
+            buffer: self.data.as_ref(),
+            head: &mut self.head,
+            tail: &mut self.tail,
+            len: &mut self.len,
+        }
     }
 
     /// Creates an iterator over buffer.
     #[inline]
     pub fn iter<'a>(&'a self) -> WheelBufIter<'a, C, I> {
         WheelBufIter {
-            buffer: &self,
+            buffer: self,
             cur: 0,
         }
-    }
-
-    #[inline]
-    fn read_start(&self) -> usize {
-        self.pos - (self.len() % self.capacity())
     }
 }
 
@@ -112,12 +133,48 @@ impl<C, I> WheelBuf<C, I>
     where C: AsMut<[I]> + AsRef<[I]>,
           I: Clone,
 {
-    /// Add item to wheel buffer.
+    /// Push to the front of the wheel.
     #[inline]
     pub fn push<J: Borrow<I>>(&mut self, item: J) {
-        self.data.as_mut()[self.pos].clone_from(item.borrow());
-        self.total += 1;
-        self.pos = (self.pos + 1) % self.data.as_ref().len();
+        self.data.as_mut()[self.head].clone_from(item.borrow());
+
+        if self.tail == self.head && self.len > 0 {
+            self.tail = (self.tail + 1) % self.capacity();
+        }
+
+        self.head = (self.head + 1) % self.capacity();
+
+        if self.len < self.capacity() {
+            self.len += 1;
+        }
+    }
+}
+
+impl<'a, I> Iterator for WheelBufDrain<'a, I>
+    where I: 'a,
+{
+    type Item = &'a I;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if *self.len > 0 {
+            let elem = &self.buffer[*self.tail];
+
+            // if *self.tail == *self.head {
+            //     *self.tail = (*self.tail + 1) % self.buffer.len();
+            //     *self.head = *self.tail;
+            // } else {
+            //     *self.tail = (*self.tail + 1) % self.buffer.len();
+            // }
+            *self.tail = (*self.tail + 1) % self.buffer.len();
+            *self.len -= 1;
+
+            Some(elem)
+        } else {
+            *self.head = 0;
+            *self.tail = 0;
+            None
+        }
     }
 }
 
@@ -136,12 +193,12 @@ impl<'a, C, I> Iterator for WheelBufIter<'a, C, I>
 
         let cur = self.cur;
         self.cur += 1;
-        Some(&self.buffer.data.as_ref()[(self.buffer.read_start() + cur) % self.buffer.capacity()])
+        Some(&self.buffer.data.as_ref()[(self.buffer.tail + cur) % self.buffer.capacity()])
     }
 
     #[inline]
     fn nth(&mut self, n: usize) -> Option<Self::Item> {
-        let max_idx = cmp::min(self.buffer.total, self.buffer.capacity());
+        let max_idx = self.buffer.len;
 
         if n > 0 {
             self.cur += cmp::min(n, max_idx);
@@ -227,6 +284,40 @@ mod tests {
         assert_eq!(iter.next().unwrap()[0], 'r');
         assert_eq!(iter.next().unwrap()[0], 'l');
         assert_eq!(iter.next().unwrap()[0], 'd');
+    }
+
+    #[test]
+    fn drain() {
+        let mut buf = ['x'; 8];
+        let mut wheel = WheelBuf::new(&mut buf);
+
+        wheel.push('H');
+        wheel.push('e');
+        wheel.push('l');
+        wheel.push('l');
+        wheel.push('o');
+        wheel.push(' ');
+        wheel.push('W');
+        wheel.push('o');
+        wheel.push('r');
+        wheel.push('l');
+        wheel.push('d');
+        assert_eq!(wheel.len(), 8);
+        {
+            let mut drain = wheel.drain();
+            assert_eq!(*drain.next().unwrap(), 'l');
+            assert_eq!(*drain.next().unwrap(), 'o');
+        }
+
+        assert_eq!(wheel.len(), 6);
+        assert_eq!(wheel.head(), 3);
+        assert_eq!(wheel.tail(), 5);
+        let s: String = wheel.drain().cloned().collect();
+        assert_eq!(s.as_str(), " World");
+
+        assert_eq!(wheel.len(), 0);
+        assert_eq!(wheel.head(), 0);
+        assert_eq!(wheel.tail(), 0);
     }
 
     #[test]
