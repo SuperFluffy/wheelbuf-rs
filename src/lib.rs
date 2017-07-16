@@ -11,13 +11,14 @@
 #![no_std]
 
 use core::cmp;
+use core::borrow::Borrow;
 use core::convert::AsRef;
 use core::marker::PhantomData;
 use core::fmt::Write;
 
-//! A multi-read Ringbuffer.
-//!
-//! The Write trait is implemented for `char` buffers, see below.
+/// A multi-read Ringbuffer.
+///
+/// The Write trait is implemented for `char` buffers, see below.
 #[derive(Debug)]
 pub struct WheelBuf<C, I>
     where C: AsMut<[I]> + AsRef<[I]>
@@ -34,7 +35,7 @@ pub struct WheelBuf<C, I>
     _pd: PhantomData<I>,
 }
 
-//! WheelBuf iterator
+/// WheelBuf iterator
 #[derive(Debug)]
 pub struct WheelBufIter<'a, C, I>
     where C: AsMut<[I]> + AsRef<[I]>,
@@ -46,7 +47,7 @@ pub struct WheelBufIter<'a, C, I>
 }
 
 impl<C, I> WheelBuf<C, I>
-    where C: AsMut<[I]> + AsRef<[I]>
+    where C: AsMut<[I]> + AsRef<[I]>,
 {
     /// Creates a new WheelBuf.
     ///
@@ -70,13 +71,13 @@ impl<C, I> WheelBuf<C, I>
         self.total
     }
 
-    /// Add item to wheel buffer.
-    #[inline]
-    pub fn push(&mut self, item: I) {
-        self.data.as_mut()[self.pos] = item;
-        self.total += 1;
-        self.pos = (self.pos + 1) % self.data.as_ref().len();
-    }
+    // /// Add item to wheel buffer.
+    // #[inline]
+    // pub fn push(&mut self, item: I) {
+    //     self.data.as_mut()[self.pos] = item;
+    //     self.total += 1;
+    //     self.pos = (self.pos + 1) % self.data.as_ref().len();
+    // }
 
     /// Capacity of wheel buffer.
     ///
@@ -104,6 +105,19 @@ impl<C, I> WheelBuf<C, I>
     #[inline]
     fn read_start(&self) -> usize {
         self.pos - (self.len() % self.capacity())
+    }
+}
+
+impl<C, I> WheelBuf<C, I>
+    where C: AsMut<[I]> + AsRef<[I]>,
+          I: Clone,
+{
+    /// Add item to wheel buffer.
+    #[inline]
+    pub fn push<J: Borrow<I>>(&mut self, item: J) {
+        self.data.as_mut()[self.pos].clone_from(item.borrow());
+        self.total += 1;
+        self.pos = (self.pos + 1) % self.data.as_ref().len();
     }
 }
 
@@ -181,6 +195,38 @@ mod tests {
 
         let s: String = wheel.iter().cloned().collect();
         assert_eq!(s.as_str(), "lo World");
+    }
+
+    #[test]
+    fn clonable() {
+        let mut buf = vec![vec!['x']; 8];
+        let mut wheel = WheelBuf::new(&mut buf);
+
+        wheel.push(vec!['H']);
+        wheel.push(vec!['e']);
+        wheel.push(vec!['l']);
+        assert_eq!(wheel.len(), 3);
+        assert_eq!(wheel.iter().next().unwrap()[0], 'H');
+
+        wheel.push(vec!['l']);
+        wheel.push(vec!['o']);
+        wheel.push(vec![' ']);
+        wheel.push(vec!['W']);
+        wheel.push(vec!['o']);
+        wheel.push(vec!['r']);
+        wheel.push(vec!['l']);
+        wheel.push(vec!['d']);
+        assert_eq!(wheel.len(), 8);
+
+        let mut iter = wheel.iter();
+        assert_eq!(iter.next().unwrap()[0], 'l');
+        assert_eq!(iter.next().unwrap()[0], 'o');
+        assert_eq!(iter.next().unwrap()[0], ' ');
+        assert_eq!(iter.next().unwrap()[0], 'W');
+        assert_eq!(iter.next().unwrap()[0], 'o');
+        assert_eq!(iter.next().unwrap()[0], 'r');
+        assert_eq!(iter.next().unwrap()[0], 'l');
+        assert_eq!(iter.next().unwrap()[0], 'd');
     }
 
     #[test]
